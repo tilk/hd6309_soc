@@ -69,6 +69,13 @@ void sig_handler(int sig)
     exit_wanted = true;
 }
 
+void fifo_debug(struct fifo_regs *fifo_info)
+{
+    fprintf(stderr, "fill_level: %d i_status: %d event: %d interruptenable: %d almostfull: %d almostempty: %d\n",
+        fifo_info->fill_level, fifo_info->i_status, fifo_info->event,
+        fifo_info->interruptenable, fifo_info->almostfull, fifo_info->almostempty);
+}
+
 int main(int argc, char **argv)
 {
     void *virtual_base;
@@ -102,14 +109,14 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    int fd = open( "/dev/mem", (O_RDWR | O_SYNC));
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (fd == -1) {
-        fprintf(stderr, "ERROR: could not open \"/dev/mem\"...\n");
+        perror("could not open /dev/mem:");
         return 1;
     }
-    virtual_base = mmap(NULL, HW_REGS_SPAN, ( PROT_READ | PROT_WRITE ), MAP_SHARED, fd, HW_REGS_BASE);
+    virtual_base = mmap(NULL, HW_REGS_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, HW_REGS_BASE);
     if (virtual_base == MAP_FAILED) {
-        fprintf(stderr, "ERROR: mmap() failed...\n");
+        perror("mmap() failed:");
         close(fd);
         return 1;
     }
@@ -124,17 +131,6 @@ int main(int argc, char **argv)
     out_fifo = LWBRIDGE_OFFSET(virtual_base, FIFO_OUT_OUT_BASE);
     debug_fifo = LWBRIDGE_OFFSET(virtual_base, FIFO_DEBUG_OUT_BASE);
 
-        fprintf(stderr, "fill_level: %d i_status: %d event: %d interruptenable: %d almostfull: %d almostempty: %d\n",
-            in_fifo_info->fill_level, in_fifo_info->i_status, in_fifo_info->event,
-            in_fifo_info->interruptenable, in_fifo_info->almostfull, in_fifo_info->almostempty);
-        *in_fifo = '6';
-        *in_fifo = '6';
-        *in_fifo = '6';
-        *in_fifo = '\n';
-        *in_fifo = '\n';
-        fprintf(stderr, "fill_level: %d i_status: %d event: %d interruptenable: %d almostfull: %d almostempty: %d\n",
-            in_fifo_info->fill_level, in_fifo_info->i_status, in_fifo_info->event,
-            in_fifo_info->interruptenable, in_fifo_info->almostfull, in_fifo_info->almostempty);
     
     fprintf(stderr, "Resetting CPU...\n");
     control_pio->outclear = CONTROL_NRESET;
@@ -153,6 +149,7 @@ int main(int argc, char **argv)
     fclose(prog);
     ram_addr[0xF7FC] = program_size >> 8;
     ram_addr[0xF7FD] = program_size;
+    ram_addr[0xF7FF] = 1;
     fprintf(stderr, "Program size: %d\n", program_size);
 
 /*
@@ -161,6 +158,8 @@ int main(int argc, char **argv)
         printf("%.2x\n", rom_addr[i]);
     }
 */
+    int flags = fcntl(0, F_GETFL, 0);
+    fcntl(0, F_SETFL, flags | O_NONBLOCK);
 
     if (opt_debug) control_pio->outset = CONTROL_HALT;
     else control_pio->outclear = CONTROL_HALT;
@@ -169,9 +168,6 @@ int main(int argc, char **argv)
     for (int i = 0; (!opt_debug || i < opt_steps) && !exit_wanted; i++) {
         if (opt_debug) {
             fprintf(stderr, "Step %d\n", i);
-        fprintf(stderr, "fill_level: %d i_status: %d event: %d interruptenable: %d almostfull: %d almostempty: %d\n",
-            in_fifo_info->fill_level, in_fifo_info->i_status, in_fifo_info->event,
-            in_fifo_info->interruptenable, in_fifo_info->almostfull, in_fifo_info->almostempty);
             control_pio->outset = CONTROL_STEP;
             usleep(10000);
             while (debug_fifo_info->fill_level) {
@@ -183,20 +179,20 @@ int main(int argc, char **argv)
         }
         while (out_fifo_info->fill_level) {
             char ch = *out_fifo;
-            fputc(ch, stdout);
+            write(1, &ch, 1);
         }
-        if (in_fifo_info->i_status & FIFO_STATUS_UNDERFLOW) {
-        fprintf(stderr, "fill_level: %d i_status: %d event: %d interruptenable: %d almostfull: %d almostempty: %d\n",
-            in_fifo_info->fill_level, in_fifo_info->i_status, in_fifo_info->event,
-            in_fifo_info->interruptenable, in_fifo_info->almostfull, in_fifo_info->almostempty);
-            *in_fifo = fgetc(stdin);
+        if (!(in_fifo_info->i_status & FIFO_STATUS_FULL)) {
+            char ch;
+            if (read(0, &ch, 1) == 1)
+                *in_fifo = ch;
         }
+        if (ram_addr[0xF7FF] == 0) exit_wanted = 1;
     }
     control_pio->outclear = CONTROL_NRESET;
-
+/*
     fprintf(stderr, "IN FIFO fill: %d\n", in_fifo_info->fill_level);
     fprintf(stderr, "OUT FIFO fill: %d\n", out_fifo_info->fill_level);
-
+*/
     if( munmap( virtual_base, HW_REGS_SPAN ) != 0 ) {
         fprintf(stderr, "ERROR: munmap() failed...\n");
         close(fd);
